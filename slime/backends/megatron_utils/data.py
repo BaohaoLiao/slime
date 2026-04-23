@@ -294,10 +294,25 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
     so that when ``num_partitions >= get_minimum_num_micro_batch_size(...)``,
     every partition is guaranteed to stay within *max_tokens*.
     """
+    if len(seqlen_list) < num_partitions:
+        raise AssertionError(f"number of items:[{len(seqlen_list)}] < k_partitions:[{num_partitions}]")
+
     partitions: list[list[int]] = [[] for _ in range(num_partitions)]
     sums = [0] * num_partitions
 
-    for idx, length in enumerate(seqlen_list):
+    # Seed each partition with one sample first so downstream micro-batch
+    # consumers never receive an empty batch.
+    for i in range(num_partitions):
+        length = seqlen_list[i]
+        if length > max_tokens:
+            raise AssertionError(
+                f"sample length {length} exceeds max_tokens {max_tokens}, cannot build capped partitions"
+            )
+        partitions[i].append(i)
+        sums[i] = length
+
+    for idx in range(num_partitions, len(seqlen_list)):
+        length = seqlen_list[idx]
         for i in range(num_partitions):
             if sums[i] + length <= max_tokens:
                 partitions[i].append(idx)
