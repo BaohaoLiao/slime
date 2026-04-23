@@ -297,22 +297,15 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
     if len(seqlen_list) < num_partitions:
         raise AssertionError(f"number of items:[{len(seqlen_list)}] < k_partitions:[{num_partitions}]")
 
+    if any(length > max_tokens for length in seqlen_list):
+        raise AssertionError(
+            f"found sample length exceeding max_tokens {max_tokens}, cannot build capped partitions"
+        )
+
     partitions: list[list[int]] = [[] for _ in range(num_partitions)]
     sums = [0] * num_partitions
 
-    # Seed each partition with one sample first so downstream micro-batch
-    # consumers never receive an empty batch.
-    for i in range(num_partitions):
-        length = seqlen_list[i]
-        if length > max_tokens:
-            raise AssertionError(
-                f"sample length {length} exceeds max_tokens {max_tokens}, cannot build capped partitions"
-            )
-        partitions[i].append(i)
-        sums[i] = length
-
-    for idx in range(num_partitions, len(seqlen_list)):
-        length = seqlen_list[idx]
+    for idx, length in enumerate(seqlen_list):
         for i in range(num_partitions):
             if sums[i] + length <= max_tokens:
                 partitions[i].append(idx)
@@ -320,6 +313,22 @@ def _get_capped_partitions(seqlen_list: Sequence[int], num_partitions: int, max_
                 break
         else:
             raise AssertionError("This should never happen.")
+
+    empty_partitions = [i for i, partition in enumerate(partitions) if not partition]
+    if not empty_partitions:
+        return [sorted(p) for p in partitions]
+
+    donor_partitions = [i for i, partition in enumerate(partitions) if len(partition) > 1]
+    donor_cursor = 0
+    for empty_idx in empty_partitions:
+        while donor_cursor < len(donor_partitions) and len(partitions[donor_partitions[donor_cursor]]) <= 1:
+            donor_cursor += 1
+        if donor_cursor >= len(donor_partitions):
+            raise AssertionError("unable to split capped partitions into non-empty micro-batches")
+
+        donor_idx = donor_partitions[donor_cursor]
+        moved_sample_idx = partitions[donor_idx].pop()
+        partitions[empty_idx].append(moved_sample_idx)
 
     return [sorted(p) for p in partitions]
 
