@@ -541,14 +541,33 @@ def apply_opd_kl_to_advantages(
     advantages: list[torch.Tensor],
     student_log_probs: list[torch.Tensor] | None,
 ) -> None:
-    """Apply on-policy distillation KL penalty to advantages.
+    """Apply on-policy distillation KL penalty to advantages (in-place).
 
-    Computes reverse KL (student_logp - teacher_logp) and adds weighted penalty
-    to advantages in-place. This is orthogonal to the base advantage estimator.
+    Default behavior (loss_mask is binary 0/1, opd_sft_coef == 0): subtracts
+    the per-token reverse KL ``(student_logp - teacher_logp) * opd_kl_coef``
+    from advantages at every position. Identical to upstream slime.
+
+    Mixed forward/reverse-KL (opd_sft_coef > 0 and per-token mask available
+    at ``rollout_data['loss_masks_3val']``): the 3-valued mask uses
+
+        0  →  ignored (tool observations, padding)
+        1  →  reverse KL (student-generated assistant tokens)
+        2  →  forward KL / SFT (in-prompt assistant demonstration tokens)
+
+    At mask==1 positions we add ``-opd_kl_coef * reverse_kl`` to the
+    advantage as before. At mask==2 positions we add ``+opd_sft_coef`` (a
+    constant). Combined with the policy loss ``-ratio * advantage``, this
+    produces a per-token gradient ``-opd_sft_coef * grad(student_logp)``
+    at SFT positions (with ratio=1 when --use-rollout-logprobs is off),
+    which is exactly forward-KL minimization (≡ SFT cross-entropy on the
+    demonstration tokens, up to a constant teacher-entropy term).
 
     Args:
-        args: Configuration containing `use_opd` and `opd_kl_coef`.
-        rollout_data: Dict containing "teacher_log_probs".
+        args: Configuration containing `use_opd`, `opd_kl_coef`, and
+            `opd_sft_coef`.
+        rollout_data: Dict containing "teacher_log_probs" and optionally
+            "loss_masks_3val" (the un-binarized mask preserved by
+            compute_advantages_and_returns).
         advantages: List of advantage tensors to modify in-place.
         student_log_probs: List of student log-probability tensors.
 
@@ -566,10 +585,20 @@ def apply_opd_kl_to_advantages(
     device = student_log_probs[0].device
     teacher_log_probs = [t.to(device=device) for t in teacher_log_probs]
 
+    opd_sft_coef = float(getattr(args, "opd_sft_coef", 0.0) or 0.0)
+    masks_3val = rollout_data.get("loss_masks_3val") if opd_sft_coef > 0 else None
+
     reverse_kls = []
     for i, adv in enumerate(advantages):
         reverse_kl = student_log_probs[i] - teacher_log_probs[i]
-        advantages[i] = adv - args.opd_kl_coef * reverse_kl
+        if masks_3val is not None:
+            mask = masks_3val[i].to(device=device)
+            rev_w = (mask == 1).to(adv.dtype)
+            sft_w = (mask == 2).to(adv.dtype)
+            adv_adj = -args.opd_kl_coef * reverse_kl * rev_w + opd_sft_coef * sft_w
+            advantages[i] = adv + adv_adj
+        else:
+            advantages[i] = adv - args.opd_kl_coef * reverse_kl
         reverse_kls.append(reverse_kl)
 
     # Store reverse KL for logging
@@ -605,6 +634,17 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
     loss_masks: list[torch.Tensor] = rollout_data.get("loss_masks")
     total_lengths: list[int] = rollout_data.get("total_lengths")
     max_seq_lens: list[int] | None = rollout_data.get("max_seq_lens", None)
+
+    # Mixed forward/reverse-KL OPD support: if a custom rollout emits a
+    # 3-valued loss_mask (0=ignore, 1=reverse-KL, 2=SFT/forward-KL), preserve
+    # the original mask under "loss_masks_3val" for apply_opd_kl_to_advantages
+    # and binarize the active loss_masks so all other consumers (PPO loss,
+    # advantage whitening, per-rank token-count weighting, RPP/RPP-baseline
+    # advantage calculators, CP utils) see a normal 0/1 mask.
+    if loss_masks is not None and any((m > 1).any() for m in loss_masks):
+        rollout_data["loss_masks_3val"] = loss_masks
+        loss_masks = [(m > 0).to(m.dtype) for m in loss_masks]
+        rollout_data["loss_masks"] = loss_masks
 
     # return when not the last pp stage.
     if not mpu.is_pipeline_last_stage():
