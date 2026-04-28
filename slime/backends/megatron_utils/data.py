@@ -462,17 +462,68 @@ def log_rollout_data(
         loss_masks = rollout_data["loss_masks"]
         total_lengths = rollout_data["total_lengths"]
         max_seq_lens = rollout_data.get("max_seq_lens", None)
+        loss_masks_3val = rollout_data.get("loss_masks_3val", None)
+
+        # Per-bucket reducers for OPD mixed-loss metrics (forward-KL via SFT
+        # at mask==2 vs reverse-KL at mask==1). Built only when the 3-valued
+        # mask was preserved by `compute_advantages_and_returns`.
+        rev_only_reducer = None
+        sft_only_reducer = None
+        rev_only_masks = None
+        sft_only_masks = None
+        if loss_masks_3val is not None:
+            rev_only_masks = [(m == 1).to(m.dtype) for m in loss_masks_3val]
+            sft_only_masks = [(m == 2).to(m.dtype) for m in loss_masks_3val]
+            rev_only_reducer = get_sum_of_sample_mean(
+                total_lengths,
+                response_lengths,
+                rev_only_masks,
+                qkv_format=args.qkv_format,
+                max_seq_lens=max_seq_lens,
+            )
+            sft_only_reducer = get_sum_of_sample_mean(
+                total_lengths,
+                response_lengths,
+                sft_only_masks,
+                qkv_format=args.qkv_format,
+                max_seq_lens=max_seq_lens,
+            )
 
         for key, val in rollout_data.items():
             if key in [
                 "tokens",
                 "multimodal_train_inputs",
                 "loss_masks",
+                "loss_masks_3val",
                 "sample_indices",
                 "rollout_routed_experts",
                 "max_seq_lens",
                 "dynamic_global_batch_size",
             ]:
+                continue
+            # OPD per-bucket metrics: log over mask==1 (reverse-KL bucket) and
+            # mask==2 (SFT bucket) separately so reverse_kl and sft_loss are
+            # not blended into a single misleading average.
+            if key == "opd_reverse_kl" and rev_only_reducer is not None:
+                cat = torch.cat(val).clone().detach()
+                # Mean reverse-KL over reverse-KL positions only.
+                log_dict["opd_reverse_kl_at_rev"] = (
+                    cp_size * rev_only_reducer(cat) / len(loss_masks)
+                ).item()
+                # Token-bucket sizes (per-sample averages, summed across CP).
+                log_dict["opd_rev_tokens_per_sample"] = (
+                    sum(m.sum().item() for m in rev_only_masks) / max(len(rev_only_masks), 1)
+                )
+                log_dict["opd_sft_tokens_per_sample"] = (
+                    sum(m.sum().item() for m in sft_only_masks) / max(len(sft_only_masks), 1)
+                )
+                continue
+            if key == "opd_neg_student_logp" and sft_only_reducer is not None:
+                cat = torch.cat(val).clone().detach()
+                # Mean -student_logp over SFT positions == per-token SFT NLL.
+                log_dict["opd_sft_loss_at_sft"] = (
+                    cp_size * sft_only_reducer(cat) / len(loss_masks)
+                ).item()
                 continue
             # Upload per sample mean for each rollout value
             # There are the following assumptions:

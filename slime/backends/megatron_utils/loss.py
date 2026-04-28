@@ -589,6 +589,7 @@ def apply_opd_kl_to_advantages(
     masks_3val = rollout_data.get("loss_masks_3val") if opd_sft_coef > 0 else None
 
     reverse_kls = []
+    neg_student_logps = []
     for i, adv in enumerate(advantages):
         reverse_kl = student_log_probs[i] - teacher_log_probs[i]
         if masks_3val is not None:
@@ -600,9 +601,15 @@ def apply_opd_kl_to_advantages(
         else:
             advantages[i] = adv - args.opd_kl_coef * reverse_kl
         reverse_kls.append(reverse_kl)
+        # -student_logp at every position; the rollout-level metric in
+        # data.py reduces this over mask==2 positions only to give the
+        # actual per-token SFT NLL.
+        neg_student_logps.append((-student_log_probs[i]).clone().detach())
 
     # Store reverse KL for logging
     rollout_data["opd_reverse_kl"] = reverse_kls
+    if masks_3val is not None:
+        rollout_data["opd_neg_student_logp"] = neg_student_logps
 
 
 def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
