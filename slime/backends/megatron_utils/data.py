@@ -501,6 +501,35 @@ def log_rollout_data(
                 "dynamic_global_batch_size",
             ]:
                 continue
+            # OPD per-sample turn-decay weight (mean-1 normalized): log
+            # mean/min/max so we can see the distribution of weights actually
+            # applied each step. Weighted-1 mean across a balanced batch.
+            if key == "opd_rev_kl_weight" and isinstance(val, (list, tuple)) and len(val) > 0:
+                weights = [float(w) for w in val]
+                log_dict["opd_rev_kl_weight_mean"] = sum(weights) / len(weights)
+                log_dict["opd_rev_kl_weight_min"] = min(weights)
+                log_dict["opd_rev_kl_weight_max"] = max(weights)
+                continue
+            if (
+                key == "assistant_turn_index"
+                and isinstance(val, (list, tuple))
+                and len(val) > 0
+            ):
+                ks = [int(k) for k in val if int(k) >= 0]
+                if ks:
+                    log_dict["assistant_turn_index_mean"] = sum(ks) / len(ks)
+                    log_dict["assistant_turn_index_max"] = max(ks)
+                continue
+            if (
+                key == "total_assistant_turns"
+                and isinstance(val, (list, tuple))
+                and len(val) > 0
+            ):
+                Ks = [int(k) for k in val if int(k) >= 0]
+                if Ks:
+                    log_dict["total_assistant_turns_mean"] = sum(Ks) / len(Ks)
+                    log_dict["total_assistant_turns_max"] = max(Ks)
+                continue
             # OPD per-bucket metrics: log over mask==1 (reverse-KL bucket) and
             # mask==2 (SFT bucket) separately so reverse_kl and sft_loss are
             # not blended into a single misleading average.

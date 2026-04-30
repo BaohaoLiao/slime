@@ -731,6 +731,31 @@ class RolloutManager:
         if samples[0].metadata and "round_number" in samples[0].metadata:
             train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
 
+        # OPD per-turn reverse-KL weight (per-sample scalar). Mean-1 normalized
+        # across the K siblings of the same teacher trace; passes through to
+        # apply_opd_kl_to_advantages where it scales the reverse-KL term only.
+        if any(sample.metadata and "opd_rev_kl_weight" in sample.metadata for sample in samples):
+            train_data["opd_rev_kl_weight"] = [
+                float(sample.metadata["opd_rev_kl_weight"])
+                if sample.metadata and "opd_rev_kl_weight" in sample.metadata
+                else 1.0
+                for sample in samples
+            ]
+        if any(sample.metadata and "assistant_turn_index" in sample.metadata for sample in samples):
+            train_data["assistant_turn_index"] = [
+                int(sample.metadata["assistant_turn_index"])
+                if sample.metadata and "assistant_turn_index" in sample.metadata
+                else -1
+                for sample in samples
+            ]
+        if any(sample.metadata and "total_assistant_turns" in sample.metadata for sample in samples):
+            train_data["total_assistant_turns"] = [
+                int(sample.metadata["total_assistant_turns"])
+                if sample.metadata and "total_assistant_turns" in sample.metadata
+                else -1
+                for sample in samples
+            ]
+
         # Add rollout log probabilities for off-policy correction
         if samples[0].rollout_log_probs is not None:
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
@@ -786,6 +811,9 @@ class RolloutManager:
                 "rollout_routed_experts",
                 "prompt",
                 "teacher_log_probs",
+                "opd_rev_kl_weight",
+                "assistant_turn_index",
+                "total_assistant_turns",
             ]:
                 if key not in data:
                     continue

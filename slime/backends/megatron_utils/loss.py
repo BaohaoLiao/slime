@@ -588,18 +588,31 @@ def apply_opd_kl_to_advantages(
     opd_sft_coef = float(getattr(args, "opd_sft_coef", 0.0) or 0.0)
     masks_3val = rollout_data.get("loss_masks_3val") if opd_sft_coef > 0 else None
 
+    # Per-sample reverse-KL weight (mean-1 normalized turn-decay schedule).
+    # When provided, scales the reverse-KL contribution sample-by-sample so
+    # that earlier-turn samples (more exploration) get larger gradient and
+    # later-turn samples (more constrained) get smaller gradient. The SFT
+    # bucket (mask==2) is intentionally NOT weighted: teacher demonstration
+    # tokens are ground truth at any turn position.
+    rev_kl_sample_weights = rollout_data.get("opd_rev_kl_weight")
+
     reverse_kls = []
     neg_student_logps = []
     for i, adv in enumerate(advantages):
         reverse_kl = student_log_probs[i] - teacher_log_probs[i]
+        sample_w = (
+            float(rev_kl_sample_weights[i])
+            if rev_kl_sample_weights is not None
+            else 1.0
+        )
         if masks_3val is not None:
             mask = masks_3val[i].to(device=device)
-            rev_w = (mask == 1).to(adv.dtype)
+            rev_w = (mask == 1).to(adv.dtype) * sample_w
             sft_w = (mask == 2).to(adv.dtype)
             adv_adj = -args.opd_kl_coef * reverse_kl * rev_w + opd_sft_coef * sft_w
             advantages[i] = adv + adv_adj
         else:
-            advantages[i] = adv - args.opd_kl_coef * reverse_kl
+            advantages[i] = adv - args.opd_kl_coef * reverse_kl * sample_w
         reverse_kls.append(reverse_kl)
         # -student_logp at every position; the rollout-level metric in
         # data.py reduces this over mask==2 positions only to give the
